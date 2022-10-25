@@ -79,12 +79,12 @@ attendedClass  classInfo = isSome .  find (\t -> anHourBefore < t && t < endTime
 
 
 template GymClassRegistration with
-    instructor: Party
+    gym: Party
     member: Party
     classInfo: ClassInfo
     status: RegistrationStatus
  where
-  signatory instructor, member
+  signatory gym, member
   
   choice Cancel : ()
         controller member
@@ -93,7 +93,7 @@ template GymClassRegistration with
 
   choice MoveInQueue : ContractId GymClassRegistration
         with newStatus: RegistrationStatus
-        controller instructor
+        controller gym
         do
             create $ this {status = newStatus}
     
