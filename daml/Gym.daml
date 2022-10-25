@@ -9,11 +9,6 @@ import DA.Foldable (mapA_)
 import DA.Time (minutes, addRelTime)
 import DA.Date (toDateUTC, subtractDays)
 
---  TO README
--- 1. cant enter a contract containing data that is invisible to you (makes sense but e.g. cards) - people
--- 2. all logic runs as a Party, no super power e.g. the app/code, have to add a party to do that role
--- 3. Divulgance if a contract causes a strike everyone sees that, you can get round it e.g. the gymclass parent holding the state but now
-
 template MembershipApplication
   with
     gym : Party
