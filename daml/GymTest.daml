@@ -1,0 +1,149 @@
+module GymTest where
+
+import qualified DA.Set as S (Set, fromList)
+import Daml.Script (query, queryContractId, exerciseCmd, allocateParty, createCmd, Script)
+import DA.Optional (isNone, isSome)
+import DA.Time (time)
+import DA.Date (fromGregorian, Month(Jan), subtractDays)
+import Gym
+
+waitingListAndCancelations : Script ()
+waitingListAndCancelations = do
+        gym <- allocateParty "gym"
+        (alice, alicesMembershipId) <- setupMembership gym "alice"
+        (bob, bobsMembershipId) <- setupMembership gym "bob"
+        (clare, claresMembershipId) <- setupMembership gym "clare"
+        (dave, davesMembershipId) <- setupMembership gym "dave"
+        (gymClassId, classInfo) <- inviteToGymClass gym [alice, bob, clare, dave]
+
+        Some (gymClassId, alicesRegistrationId) <- submit alice $ exerciseCmd alicesMembershipId $ RegisterForGymClass gymClassId 
+        Some (gymClassId, _) <- submit bob $ exerciseCmd bobsMembershipId $ RegisterForGymClass gymClassId 
+        Some (gymClassId, claresRegistrationId) <- submit clare $ exerciseCmd claresMembershipId $ RegisterForGymClass gymClassId 
+        Some (gymClassId, _) <- submit dave $ exerciseCmd davesMembershipId $ RegisterForGymClass gymClassId 
+
+        initialRegistrations <- allRegistrations gym
+        assertMsg "Registrations not added to waiting list correctly" $ 
+            initialRegistrations == S.fromList [(alice, Registered), (bob, OnWaitingList 1), (clare, OnWaitingList 2), (dave, OnWaitingList 3)]
+
+        submit alice $ exerciseCmd alicesRegistrationId $ Cancel 
+        submit clare $ exerciseCmd claresRegistrationId $ Cancel 
+
+        updateWaitingList gym 1 classInfo
+
+        postCancelationRegistrations <- allRegistrations gym
+        assertMsg "Registrations not updated correctly after cancelations" $ 
+            postCancelationRegistrations == S.fromList [ (bob, Registered), (dave, OnWaitingList 1)]
+
+
+cantRegisterUpWithThreeStrikes : Script ()
+cantRegisterUpWithThreeStrikes = do
+        setup <- singleMembershipWithStrikesAndGymClass [today, yesterday, fiveMonthsAnd29DaysAgo]
+
+        registration <- submit setup.member $ exerciseCmd setup.membershipId $ RegisterForGymClass setup.gymClassId 
+
+        assert $ isNone registration
+
+strikesExpireAfterSixMonths : Script ()
+strikesExpireAfterSixMonths = do
+        setup <- singleMembershipWithStrikesAndGymClass [today, yesterday, sixMonthsAndOneDayAgo]
+
+        registration <- submit setup.member $ exerciseCmd setup.membershipId $ RegisterForGymClass setup.gymClassId 
+        assert $ isSome registration
+
+receiveAStrikeIfYouDontAttendAClassYouAreRegisteredFor : Script ()
+receiveAStrikeIfYouDontAttendAClassYouAreRegisteredFor = do
+        setup <- singleMembershipAndGymClass 
+
+        Some (_, registrationId) <- submit setup.member $ exerciseCmd setup.membershipId $ RegisterForGymClass (setup.gymClassId) 
+        membershipId <- submit setup.gym $ exerciseCmd setup.membershipId $ CheckAttendence registrationId
+
+        Some membership <- queryContractId setup.gym membershipId
+        assertMsg "Strike not added for member who didnt attend" (membership.strikes == [today])
+
+dontReceiveAStrikeIfYouAttend : Script ()
+dontReceiveAStrikeIfYouAttend = do
+        setup <- singleMembershipAndGymClass 
+        
+        Some (_, registrationId) <- submit setup.member $ exerciseCmd (setup.membershipId) $ RegisterForGymClass (setup.gymClassId) 
+        membershipId <- submit setup.gym $ exerciseCmd setup.membershipId $ KeyCardEntry
+        membershipId <- submit setup.gym $ exerciseCmd membershipId $ CheckAttendence registrationId
+
+        Some membership <- queryContractId setup.gym membershipId
+        assert (null membership.strikes )
+
+dontReceiveAStrikeIfYouDontAttendOnTheWaitingList : Script ()
+dontReceiveAStrikeIfYouDontAttendOnTheWaitingList = do
+        gym <- allocateParty "gym"
+        (alice, alicesMembershipId) <- setupMembership gym "alice"
+        (bob, bobsMembershipId) <- setupMembership gym "bob"
+
+        (gymClassId, classInfo) <- inviteToGymClass gym [alice, bob]
+        Some (gymClassId, _) <- submit alice $ exerciseCmd alicesMembershipId $ RegisterForGymClass gymClassId 
+        Some (gymClassId, bobsRegistrationId) <- submit bob $ exerciseCmd bobsMembershipId $ RegisterForGymClass gymClassId 
+       
+        initialRegistrations <- allRegistrations gym
+        assertMsg "Registrations not added to waiting list correctly" $ 
+            initialRegistrations == S.fromList [(alice, Registered), (bob, OnWaitingList 1)]
+
+        bobsMembershipId <- submit gym $ exerciseCmd bobsMembershipId $ CheckAttendence bobsRegistrationId
+
+        Some membership <- queryContractId gym bobsMembershipId
+        assert (null membership.strikes )
+        
+data Setup = Setup {
+    membershipId : ContractId Membership,
+    gymClassId: ContractId GymClass,
+    gym: Party,
+    member: Party
+}
+
+singleMembershipAndGymClass : Script Setup
+singleMembershipAndGymClass = singleMembershipWithStrikesAndGymClass mempty 
+
+singleMembershipWithStrikesAndGymClass : [Date] ->  Script Setup
+singleMembershipWithStrikesAndGymClass strikes = do
+        now <-  getTime
+        gym <- allocateParty "gym"
+        (alice, alicesMembershipId) <- setupMembershipWithStrikes strikes gym "alice"
+
+        (gymClassId, _) <- inviteToGymClass gym [alice]
+
+        return $ Setup alicesMembershipId gymClassId gym alice
+
+inviteToGymClass : Party -> [Party] -> Script (ContractId GymClass, ClassInfo)
+inviteToGymClass gym members = do
+     now <- getTime
+     let classInfo = ClassInfo "a class" classTime
+     gymClassId <- submit gym $ createCmd $ GymClass gym 1 0 (S.fromList members) classInfo
+     return (gymClassId, classInfo)
+
+setupMembership : Party -> Text -> Script (Party, ContractId Membership)
+setupMembership = setupMembershipWithStrikes mempty
+
+setupMembershipWithStrikes : [Date] -> Party -> Text -> Script (Party, ContractId Membership)
+setupMembershipWithStrikes strikes gym membersName  = do 
+        member <- allocateParty membersName
+
+        applicationId <- submit member $ createCmd $ MembershipApplication gym member strikes mempty
+        membershipId <- submit gym $ exerciseCmd applicationId $ AcceptApplication
+        return (member, membershipId)
+
+allRegistrations : IsParties p => p -> Script (S.Set (Party, RegistrationStatus))
+allRegistrations gym = do
+    registrations <- ((query  gym) : Script [(ContractId GymClassRegistration, GymClassRegistration)])
+    return $ S.fromList $ (\(_, s)  -> (s.member, s.status)) <$> registrations
+
+today : Date
+today = fromGregorian (1970, Jan, 1)
+
+classTime = time today 0 0 0 
+
+yesterday : Date
+yesterday = subtractDays today 1
+
+sixMonthsAndOneDayAgo : Date
+sixMonthsAndOneDayAgo = subtractDays today (6 * 30)
+
+fiveMonthsAnd29DaysAgo : Date
+fiveMonthsAnd29DaysAgo = subtractDays today (6 * 30 - 1)
+

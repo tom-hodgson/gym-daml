@@ -1,0 +1,146 @@
+module Gym where
+
+import qualified DA.Set as S (Set)
+import Daml.Script (queryFilter, exerciseCmd, Script)
+import DA.Optional (isSome)
+import DA.List (sortOn)
+import DA.Bifunctor (Bifunctor(second))
+import DA.Foldable (mapA_)
+import DA.Time (minutes, addRelTime)
+import DA.Date (toDateUTC, subtractDays)
+
+--  TO README
+-- 1. cant enter a contract containing data that is invisible to you (makes sense but e.g. cards) - people
+-- 2. all logic runs as a Party, no super power e.g. the app/code, have to add a party to do that role
+-- 3. Divulgance if a contract causes a strike everyone sees that, you can get round it e.g. the gymclass parent holding the state but now
+
+template MembershipApplication
+  with
+    gym : Party
+    applicant : Party
+
+    -- I dont like having these on the application, they should really just be initiated as empty when exercising the accept choice 
+    -- A member would never want to apply for membership with some pre-existing strikes, but It allows me to set up a membership in a specific state for testing
+    strikes: [Date]
+    attendences: [Time]
+  where
+    signatory applicant
+    observer gym
+    choice AcceptApplication : ContractId Membership
+        controller gym
+        do 
+            create $ Membership gym applicant strikes attendences
+
+
+template Membership with
+    gym: Party
+    member: Party
+    strikes: [Date]
+    attendences: [Time]
+ where    
+    signatory gym, member
+
+    nonconsuming choice RegisterForGymClass : Optional (ContractId GymClass, ContractId GymClassRegistration)
+        with gymClassId: ContractId GymClass
+        controller member
+        do 
+            today <- toDateUTC <$> getTime
+            let strikesInLast6Months = length $ filter (isLessThanSixMonthsAgo today) strikes
+            if strikesInLast6Months > 2 
+                    then return None
+                    else do
+                        updatedGymClassId <- exercise gymClassId AddMember
+                        gymClass <- fetch updatedGymClassId
+                        let positionInQueue = gymClass.registered - gymClass.spaces
+                            status = if positionInQueue > 0 then OnWaitingList positionInQueue else Registered
+                        registrationId <- create $ GymClassRegistration gym member gymClass.classInfo status
+                        
+                        return $ Some (updatedGymClassId, registrationId)
+
+    nonconsuming choice KeyCardEntry: ContractId Membership
+        controller gym
+        do
+            time <- getTime
+            create $ Membership with attendences = (time :: attendences), ..
+    
+    choice CheckAttendence : ContractId Membership
+        with registrationId: ContractId GymClassRegistration
+        controller gym
+        do 
+            registration <- fetch registrationId
+            today <- toDateUTC <$> getTime
+            let wasNoShow = registration.member == member && not (attendedClass registration.classInfo attendences) && registration.status == Registered
+            let newStrikes = [today | wasNoShow]
+            create $ Membership with strikes = (newStrikes <> strikes), ..
+
+isLessThanSixMonthsAgo : Date -> Date -> Bool
+isLessThanSixMonthsAgo today date = date > subtractDays today (6 * 30) 
+
+attendedClass : ClassInfo -> [Time] -> Bool
+attendedClass  classInfo = isSome .  find (\t -> anHourBefore < t && t < endTime) 
+    where
+        anHourBefore = addRelTime classInfo.classInfoTime (- minutes 60)
+        endTime = addRelTime classInfo.classInfoTime (minutes 60)
+
+
+template GymClassRegistration with
+    instructor: Party
+    member: Party
+    classInfo: ClassInfo
+    status: RegistrationStatus
+ where
+  signatory instructor, member
+  
+  choice Cancel : ()
+        controller member
+        do
+            return ()
+
+  choice MoveInQueue : ContractId GymClassRegistration
+        with newStatus: RegistrationStatus
+        controller instructor
+        do
+            create $ this {status = newStatus}
+    
+data RegistrationStatus = Registered | OnWaitingList Int deriving (Eq, Show, Ord)
+
+data ClassInfo = ClassInfo {
+    classInfoName : Text,
+    classInfoTime: Time
+ } deriving (Eq, Show)
+
+template GymClass with
+    gym: Party
+    spaces: Int
+    registered: Int
+    invites: S.Set Party
+    classInfo: ClassInfo
+ where
+    signatory gym
+    observer invites
+    choice AddMember : ContractId GymClass
+        controller gym
+        do 
+            create $ GymClass with registered = registered + 1, ..
+    choice RemoveMember : ContractId GymClass
+        controller gym
+        do 
+            create $ GymClass with registered = registered - 1, ..
+
+
+registrationClassInfo : GymClassRegistration -> ClassInfo
+registrationClassInfo = classInfo
+
+updateWaitingList : Party ->  Int -> ClassInfo -> Script ()
+updateWaitingList gym spaces info = do
+    registrationsById <- queryFilter gym (\c -> registrationClassInfo c == info)
+    let statusesByRegistrationId = second status <$> registrationsById
+    let (ins, queues) = partition ((== Registered) . snd) statusesByRegistrationId
+    let remainingSpaces = spaces - length ins
+    let queue = sortOn snd queues
+        newIns = take remainingSpaces queue
+        remainingOnQueue = drop remainingSpaces queue
+        newQueue = zipWith (\(cId, _) n -> (cId, n)) remainingOnQueue $  OnWaitingList <$> [1..(length remainingOnQueue)]
+
+    mapA_ (\(cId, _) -> submit gym $ exerciseCmd cId $ MoveInQueue Registered) newIns
+    mapA_ (\(cId, status) -> submit gym $ exerciseCmd cId $ MoveInQueue status) newQueue
