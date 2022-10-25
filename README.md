@@ -9,5 +9,5 @@ If a member registers for a gym class but doesnt show up, they receive a 'strike
 
 ## Implementation
 
-This implementation keeps, the member's registrations, attendences and strikes private to that individual (and the Gym party). This means each member enters a contract with the gym (not with each other). Because of this restriction we need an off ledger process `updateWaitingList` to update the waiting list due to any cancelations that may have happened. This could be run periodically or possibly from a DAML trigger (I didn't go into this). 
+This implementation keeps the member's registrations, attendences, and strikes private to that individual (and the Gym party). This means each member enters a contract with the gym (not with each other). Because of this restriction we need an off ledger process `updateWaitingList` to update the waiting list due to any cancelations that may have happened. This could be run periodically or possibly from a DAML trigger (I didn't read much about triggers). 
 
